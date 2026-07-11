@@ -128,20 +128,23 @@ jobs:
               SSR=1
             fi
           fi
-          # honest=1 → мы задеплоили ЧЕСТНУЮ страницу (сборка не дала сайт). КРАСНЫЙ решает НЕ это, а ФАКТ
-          # живого домена (шаг «Verify live site»): честно для всех — SSR-в-Docker с честной страницей на
-          # pages.dev, но живым доменом-туннелем → зелёный; статик/фреймворк с битым доменом → красный.
-          # honest нужен лишь как подсказка стадии (Build vs Deploy) в Issue.
+          # Режим сборки (те же ТРИГГЕРЫ детекции — для честной страницы и подсказки команде):
+          #   static (нет build-скрипта) / framework (есть build) / ssr (Next без output:'export').
+          MODE="static"; [ -n "$HAS_BUILD" ] && MODE="framework"; [ "$SSR" = "1" ] && MODE="ssr"
+          # honest=1 → задеплоили честную страницу (сборка не дала сайт). КРАСНЫЙ решает ФАКТ домена (шаг
+          # «Verify live site»), а не это — честно для всех (SSR-в-Docker с живым доменом → зелёный).
           HONEST=""
           [ -n "$BUILD_FAILED" ] && HONEST=1
           echo "ssr=$SSR" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "honest=$HONEST" >> "$GITHUB_OUTPUT"
           echo "deploy_dir=$DEPLOY_DIR" >> "$GITHUB_OUTPUT"
-          echo "::notice::DEPLOY_DIR=$DEPLOY_DIR ssr=${SSR:-no} honest=${HONEST:-no}"
+          echo "::notice::DEPLOY_DIR=$DEPLOY_DIR ssr=${SSR:-no} mode=$MODE honest=${HONEST:-no}"
       - name: Честная главная (страница ошибки при провале сборки / без index.html)
         if: steps.guard.outputs.ok == 'true'
         env:
           DEPLOY_DIR: ${{ steps.detect.outputs.deploy_dir }}
+          MODE: ${{ steps.detect.outputs.mode }}
         run: |
           mkdir -p "$DEPLOY_DIR"
           if [ -f "$DEPLOY_DIR/index.html" ]; then
@@ -150,17 +153,27 @@ jobs:
             echo "::warning::в ${DEPLOY_DIR} нет index.html → деплою информативную страницу вместо 404/призрака"
             LOG=""
             [ -f /tmp/build.log ] && LOG="$(tail -c 6000 /tmp/build.log | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
+            case "$MODE" in
+              ssr) HERE="🔵 Server app";; framework) HERE="🟡 Built app";; *) HERE="🟢 Plain website";; esac
             {
               printf '%s' '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Build failed — HackOnVibe</title>'
-              printf '%s' '<style>body{font:16px/1.6 system-ui,sans-serif;max-width:56rem;margin:3rem auto;padding:0 1.2rem;color:#222}h1{color:#c0392b}code{background:#f0f0f0;padding:2px 6px;border-radius:5px}pre{background:#0d1117;color:#e6edf3;padding:1rem;border-radius:10px;overflow:auto;white-space:pre-wrap;font-size:13px}</style></head><body>'
+              printf '%s' '<style>body{font:16px/1.6 system-ui,sans-serif;max-width:56rem;margin:3rem auto;padding:0 1.2rem;color:#222}h1{color:#c0392b}h3{margin-top:1.6rem}code{background:#f0f0f0;padding:2px 6px;border-radius:5px}pre{background:#0d1117;color:#e6edf3;padding:1rem;border-radius:10px;overflow:auto;white-space:pre-wrap;font-size:13px}.fork{background:#f6f8fa;border:1px solid #e2e6ea;border-radius:12px;padding:1rem 1.3rem;margin:1.2rem 0}.fork li{margin:.5rem 0}.here{background:#fff7e6;border-left:4px solid #f0a020;padding:.6rem 1rem;border-radius:6px}</style></head><body>'
               printf '%s' '<h1>⚠️ Build did not produce a live site</h1>'
-              printf '<p>This team repo has no <code>index.html</code> in its publish directory <code>%s</code>, so there is nothing to serve.</p>' "$DEPLOY_DIR"
+              printf '%s' '<p>Your latest push did not put a working site online yet. Here is exactly how our system decides to build your site — and how <b>you</b> control it by your files.</p>'
+              # ── Развилка билдов (3 режима + триггеры детекции) — для школьников, простым языком ──
+              printf '%s' '<div class="fork"><h3>3 ways we can build your site — we pick automatically from your files:</h3><ul>'
+              printf '%s' '<li>🟢 <b>Plain website</b> — if there is <b>no <code>build</code> script</b> in <code>package.json</code> (or no <code>package.json</code>), we put your files online exactly as they are, so your <code>index.html</code> shows up.</li>'
+              printf '%s' '<li>🟡 <b>Built app</b> — if <code>package.json</code> has a <b><code>build</code></b> script for a static tool (React/Vite/Astro, or Next.js with <code>output:&#39;export&#39;</code>), we run the build and publish the built folder (<code>dist</code>/<code>build</code>/<code>out</code>).</li>'
+              printf '%s' '<li>🔵 <b>Server app</b> — if it is <b>Next.js with a <code>build</code> but no <code>output:&#39;export&#39;</code></b>, it needs a live server, so we run it for you in a container (you may need to give us the API keys it needs).</li>'
+              printf '%s' '</ul>'
+              printf '<p class="here"><b>Right now your repo is in: %s.</b> To switch: <b>delete the <code>build</code> script</b> → 🟢 Plain website · <b>add <code>output:&#39;export&#39;</code></b> → 🟡 Built app · <b>keep it + send us the API keys</b> → 🔵 Server app.</p>' "$HERE"
+              printf '%s' '</div>'
               if [ -n "$LOG" ]; then
-                printf '%s' '<p>The build command <b>failed</b>. Fix the errors below and push to <code>main</code> again — the site rebuilds automatically.</p><h3>Build log (last lines):</h3><pre>'
+                printf '%s' '<p>The build command <b>failed</b> — the exact error is below. Fix it (or switch build mode above), then push to <code>main</code> again — the site rebuilds automatically.</p><h3>Build log (last lines):</h3><pre>'
                 printf '%s' "$LOG"
                 printf '%s' '</pre>'
               else
-                printf '%s' '<p>No build output was produced. If your app needs a Node.js server (Next.js SSR, API routes), it cannot run on Cloudflare Pages (static/edge only) — tell the organizers and we host it in an isolated container.</p>'
+                printf '%s' '<p>No build output was produced. Pick the build mode you want above and push to <code>main</code> again.</p>'
               fi
               printf '%s' '<p style="color:#888;margin-top:2rem;font-size:13px">HackOnVibe CI — this page auto-replaces a broken deploy so you can see exactly what went wrong.</p></body></html>'
             } > "$DEPLOY_DIR/index.html"
@@ -222,8 +235,7 @@ jobs:
       # ── ЧЕСТНЫЙ сигнал ПО ФАКТУ: домен реально отдаёт сайт, а не честную страницу-ошибку? ──
       # Единственный источник правды — живой домен (не догадки CI). Красный ⇔ домен НЕ отдаёт настоящий сайт.
       # Честно для ВСЕХ без per-case костылей: SSR-в-Docker (домен-туннель живой) → зелёный; статик/фреймворк
-      # с честной страницей на домене → красный; v-v (Next+редирект, реального деплоя у нас нет) → красный.
-      # Поллим с ретраями (пропагация Pages ~до минуты); успешный сайт выходит рано, битый — краснеет.
+      # с честной страницей на домене → красный. Поллим с ретраями (пропагация Pages ~до минуты).
       - name: Verify the site is really live (fact — red if the domain serves the build-error page)
         if: steps.guard.outputs.ok == 'true'
         run: |

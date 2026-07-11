@@ -128,15 +128,16 @@ jobs:
               SSR=1
             fi
           fi
-          # broken=1 → на домен пойдёт честная страница (нет реального index.html в выхлопе): провал сборки
-          # ИЛИ репо без index.html вовсе. Такой прогон помечаем КРАСНЫМ (шаг «Mark run red») → робот пингует
-          # команду в Discord с ИИ-диагнозом. Для НЕ-SSR (у SSR своя судьба — Docker/туннель).
-          BROKEN=""
-          if [ "$SSR" != "1" ] && { [ -n "$BUILD_FAILED" ] || [ ! -f "$DEPLOY_DIR/index.html" ]; }; then BROKEN=1; fi
+          # honest=1 → мы задеплоили ЧЕСТНУЮ страницу (сборка не дала сайт). КРАСНЫЙ решает НЕ это, а ФАКТ
+          # живого домена (шаг «Verify live site»): честно для всех — SSR-в-Docker с честной страницей на
+          # pages.dev, но живым доменом-туннелем → зелёный; статик/фреймворк с битым доменом → красный.
+          # honest нужен лишь как подсказка стадии (Build vs Deploy) в Issue.
+          HONEST=""
+          [ -n "$BUILD_FAILED" ] && HONEST=1
           echo "ssr=$SSR" >> "$GITHUB_OUTPUT"
-          echo "broken=$BROKEN" >> "$GITHUB_OUTPUT"
+          echo "honest=$HONEST" >> "$GITHUB_OUTPUT"
           echo "deploy_dir=$DEPLOY_DIR" >> "$GITHUB_OUTPUT"
-          echo "::notice::DEPLOY_DIR=$DEPLOY_DIR ssr=${SSR:-no} broken=${BROKEN:-no}"
+          echo "::notice::DEPLOY_DIR=$DEPLOY_DIR ssr=${SSR:-no} honest=${HONEST:-no}"
       - name: Честная главная (страница ошибки при провале сборки / без index.html)
         if: steps.guard.outputs.ok == 'true'
         env:
@@ -218,13 +219,24 @@ jobs:
               && echo "::notice::DNS CNAME создан -> ${NAME} (домен станет Active)" \
               || echo "::warning::DNS create не прошёл (нет Zone:DNS:Edit?)"
           fi
-      # ── Сборка не дала сайт → честная страница УЖЕ на домене; теперь помечаем прогон КРАСНЫМ ──
-      # Домен показывает «что сломалось» (наш файл), но прогон обязан быть красным — это сигнал команде
-      # и триггер робота (ИИ-диагноз → Discord). Сырой билд НЕ выкатывался (deploy_dir=.hov-ci).
-      - name: Mark run red if the build produced no site
-        if: steps.guard.outputs.ok == 'true' && steps.detect.outputs.broken == '1'
+      # ── ЧЕСТНЫЙ сигнал ПО ФАКТУ: домен реально отдаёт сайт, а не честную страницу-ошибку? ──
+      # Единственный источник правды — живой домен (не догадки CI). Красный ⇔ домен НЕ отдаёт настоящий сайт.
+      # Честно для ВСЕХ без per-case костылей: SSR-в-Docker (домен-туннель живой) → зелёный; статик/фреймворк
+      # с честной страницей на домене → красный; v-v (Next+редирект, реального деплоя у нас нет) → красный.
+      # Поллим с ретраями (пропагация Pages ~до минуты); успешный сайт выходит рано, битый — краснеет.
+      - name: Verify the site is really live (fact — red if the domain serves the build-error page)
+        if: steps.guard.outputs.ok == 'true'
         run: |
-          echo "::error::Build produced no live site — honest error page is served, marking this run as FAILED."
+          DOMAIN="${CF_PROJECT}.hackonvibe.com"
+          for i in $(seq 1 12); do
+            BODY="$(curl -s --max-time 10 "https://${DOMAIN}/?cihb=${i}${RANDOM}" || true)"
+            if [ -n "$BODY" ] && ! printf '%s' "$BODY" | grep -q "Build did not produce a live site"; then
+              echo "::notice::✓ живой сайт: https://${DOMAIN}"
+              exit 0
+            fi
+            sleep 8
+          done
+          echo "::error::Сайт НЕ живой — https://${DOMAIN} отдаёт страницу-ошибку сборки (или недоступен). Прогон КРАСНЫЙ."
           exit 1
       # ── Провал деплоя → команда видит ошибку СРАЗУ в своём GitHub Issue ──
       # Честная-страница покрывает только провал сборки И только когда заливка на Pages удалась. Если падает
@@ -237,7 +249,7 @@ jobs:
         run: |
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           # broken=1 → сборка не дала сайт (на домене честная страница). Иначе job упал на ДЕПЛОЕ/конфиге.
-          if [ "${{ steps.detect.outputs.broken }}" = "1" ]; then
+          if [ "${{ steps.detect.outputs.honest }}" = "1" ]; then
             STAGE="Build (compiling your project)"
             DIAG=$'The **build failed** — it produced no site. Your live domain now shows an honest error page (not your broken code). Fix the errors in the log below and push to `main` again.'
           else
